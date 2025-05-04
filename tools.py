@@ -11,6 +11,8 @@ from browser_use.browser.views import BrowserState
 from browser_use.agent.views import AgentOutput
 from playwright.async_api import async_playwright
 from dotenv import load_dotenv
+import anthropic
+import json
 
 load_dotenv()
 
@@ -99,44 +101,43 @@ class BrowserTool(BaseTool):
         raise NotImplementedError("BrowserTool is async only")
 
 
-# Define the tool for direct LLM interaction
-class DirectLLMTool(BaseTool):
-    name: str = "direct_llm"
-    description: str = (
-        "Use the LLM directly to answer questions without browser interaction"
-    )
+class DirectLLMTool:
+    """Tool for handling tasks using direct Claude API calls without browser automation."""
 
-    async def _arun(self, task: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        # Create LLM
-        llm = ChatAnthropic(
-            model_name="claude-3-5-sonnet-20240620",
-            temperature=0.0,
-            timeout=100,
-            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
-        )
+    name = "direct_llm"
+    description = "Use the LLM directly to answer questions without browser interaction"
 
-        # Create prompt template
-        prompt_template = """
+    async def run(self, task: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        # Create Anthropic client
+        client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+        # Prepare the prompt
+        prompt = f"""
         You are a helpful AI assistant that provides accurate and concise answers.
         
-        Context information: {context}
+        Context information: {json.dumps(context) if context else "{}"}
         
         User task: {task}
         
         Please provide a helpful response based on the task and context provided.
         """
 
-        prompt = PromptTemplate(
-            template=prompt_template, input_variables=["task", "context"]
+        # Make direct Claude API call
+        response = await client.messages.create(
+            model="claude-3-5-sonnet-20240620",
+            max_tokens=4096,
+            temperature=0,
+            system="You are a helpful AI assistant that provides accurate and concise answers.",
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"{prompt}",
+                }
+            ],
         )
 
-        # Format the prompt
-        formatted_prompt = prompt.format(task=task, context=context or {})
-
-        # Get response from LLM
-        response = await llm.ainvoke(formatted_prompt)
-
-        return {"result": response.content, "screenshot_urls": []}
-
-    def _run(self, task: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        raise NotImplementedError("DirectLLMTool is async only")
+        return {
+            "result": response.content[0].text,
+            "screenshot_urls": [],
+            "tool_used": "direct_llm",
+        }
