@@ -6,8 +6,8 @@ import os
 from dotenv import load_dotenv
 from anthropic import Anthropic
 from langgraph.graph import Graph
-from langgraph.prebuilt import ToolExecutor
-from browser_use import BrowserAgent
+from browser_use import Agent
+import asyncio
 
 # Load environment variables
 load_dotenv()
@@ -36,68 +36,45 @@ class TaskResponse(BaseModel):
     result: str
     status: str
 
-# Initialize browser agent
-browser_agent = BrowserAgent()
+# Create a Claude wrapper for browser-use
+class ClaudeLLM:
+    def __init__(self, model="claude-3-7-sonnet-20250219"):
+        self.model = model
+        self.client = claude
 
-# Define agent tools
-def search_web(query: str) -> str:
-    """Search the web for information"""
-    return browser_agent.search(query)
+    async def __call__(self, prompt: str) -> str:
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+        return response.content[0].text
 
-def browse_website(url: str) -> str:
-    """Browse a specific website"""
-    return browser_agent.visit(url)
-
-# Create tool executor
-tools = [
-    ToolExecutor(search_web),
-    ToolExecutor(browse_website)
-]
+# Initialize Claude LLM
+claude_llm = ClaudeLLM()
 
 # Define agent nodes
-def master_agent(state: Dict[str, Any]) -> Dict[str, Any]:
+async def master_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     """Master agent that coordinates other agents"""
     task = state["task"]
     context = state.get("context", {})
     
-    # Use Claude to determine the best course of action
-    response = claude.messages.create(
-        model="claude-3-7-sonnet-20250219",
-        max_tokens=1024,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Task: {task}\nContext: {context}\n\nDetermine the best tools to use and provide a plan."
-            }
-        ]
+    # Create browser agent with the task
+    agent = Agent(
+        task=task,
+        llm=claude_llm,
+        context=context
     )
     
-    # Extract plan from Claude's response
-    print(response.content)
-    plan = response.content[0].text
+    # Run the agent
+    result = await agent.run()
     
-    # Update state with plan
-    state["plan"] = plan
-    return state
-
-def execute_plan(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute the plan using available tools"""
-    plan = state["plan"]
-    
-    # Use Claude to determine which tools to use
-    response = claude.messages.create(
-        model="claude-3-7-sonnet-20250219",
-        max_tokens=1024,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Plan: {plan}\n\nSelect and use the appropriate tools to execute this plan."
-            }
-        ]
-    )
-    
-    # Execute tools based on Claude's instructions
-    result = response.content[0].text
+    # Update state with result
     state["result"] = result
     return state
 
@@ -106,23 +83,19 @@ workflow = Graph()
 
 # Add nodes
 workflow.add_node("master_agent", master_agent)
-workflow.add_node("execute_plan", execute_plan)
-
-# Add edges
-workflow.add_edge("master_agent", "execute_plan")
 
 # Set entry point
 workflow.set_entry_point("master_agent")
 
 # Compile the graph
-app = workflow.compile()
+agent_workflow = workflow.compile()
 
 # API endpoints
 @app.post("/execute_task", response_model=TaskResponse)
 async def execute_task(request: TaskRequest):
     try:
         # Execute the workflow
-        result = app.invoke({
+        result = await agent_workflow.ainvoke({
             "task": request.task,
             "context": request.context
         })
@@ -136,4 +109,4 @@ async def execute_task(request: TaskRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True) 
