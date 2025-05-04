@@ -40,23 +40,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Define models
 class TaskRequest(BaseModel):
     task: str
     context: Dict[str, Any] = {}
+
 
 class TaskResponse(BaseModel):
     result: str
     status: str
     screenshot_urls: list[str]
 
+
 def create_llm():
     return ChatAnthropic(
         model_name="claude-3-5-sonnet-20240620",
         temperature=0.0,
         timeout=100,
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY")
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
     )
+
 
 async def check_browsers():
     try:
@@ -68,6 +72,7 @@ async def check_browsers():
         logger.error(f"Browser check failed: {str(e)}")
         return False
 
+
 async def install_browsers():
     try:
         logger.info("Installing Playwright browsers...")
@@ -78,6 +83,7 @@ async def install_browsers():
         logger.error(f"Failed to install browsers: {str(e)}")
         return False
 
+
 async def take_and_save_screenshot(page, session_id, step_num, description=""):
     session_path = os.path.join(SCREENSHOT_DIR, session_id)
     os.makedirs(session_path, exist_ok=True)
@@ -86,22 +92,36 @@ async def take_and_save_screenshot(page, session_id, step_num, description=""):
     await page.screenshot(path=filepath, type="jpeg", quality=80)
     return f"/session_screenshots/{session_id}/{filename}"
 
+
 async def run_agent_with_screenshots(agent, page, session_id):
     print("Running agent with screenshots")
     screenshots = []
     step_counter = {"count": 0}
     # Take initial screenshot (blank page)
-    screenshots.append(await take_and_save_screenshot(page, session_id, step_counter["count"], "initial"))
+    screenshots.append(
+        await take_and_save_screenshot(
+            page, session_id, step_counter["count"], "initial"
+        )
+    )
     step_counter["count"] += 1
     # If the agent has a URL to visit, go there and take a screenshot
-    if hasattr(agent, 'start_url') and agent.start_url:
+    if hasattr(agent, "start_url") and agent.start_url:
         await page.goto(agent.start_url)
-        screenshots.append(await take_and_save_screenshot(page, session_id, step_counter["count"], "after_goto"))
+        screenshots.append(
+            await take_and_save_screenshot(
+                page, session_id, step_counter["count"], "after_goto"
+            )
+        )
         step_counter["count"] += 1
     # Run the agent and take a screenshot after
     result = await agent.run()
-    screenshots.append(await take_and_save_screenshot(page, session_id, step_counter["count"], "after_agent_run"))
+    screenshots.append(
+        await take_and_save_screenshot(
+            page, session_id, step_counter["count"], "after_agent_run"
+        )
+    )
     return result, screenshots
+
 
 @app.post("/execute_task", response_model=TaskResponse)
 async def execute_task(request: TaskRequest):
@@ -110,38 +130,43 @@ async def execute_task(request: TaskRequest):
         if not await check_browsers():
             logger.info("Browsers not installed, attempting to install...")
             if not await install_browsers():
-                raise HTTPException(status_code=500, detail="Failed to install browsers")
+                raise HTTPException(
+                    status_code=500, detail="Failed to install browsers"
+                )
         session_id = str(uuid.uuid4())
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=False)
             context = await browser.new_context()
             page = await context.new_page()
             llm = create_llm()
-            agent = Agent(
-                task=request.task,
-                llm=llm,
-                context=request.context
+            agent = Agent(task=request.task, llm=llm, context=request.context)
+            result, screenshot_urls = await run_agent_with_screenshots(
+                agent, page, session_id
             )
-            result, screenshot_urls = await run_agent_with_screenshots(agent, page, session_id)
             result_str = str(result)
             await context.close()
             await browser.close()
         return TaskResponse(
-            result=result_str,
-            status="success",
-            screenshot_urls=screenshot_urls
+            result=result_str, status="success", screenshot_urls=screenshot_urls
         )
     except Exception as e:
         logger.error(f"Error processing task: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # Serve screenshots statically
-app.mount("/session_screenshots", StaticFiles(directory=SCREENSHOT_DIR), name="session_screenshots")
+app.mount(
+    "/session_screenshots",
+    StaticFiles(directory=SCREENSHOT_DIR),
+    name="session_screenshots",
+)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 @app.get("/")
 async def read_root():
-    return FileResponse('static/index.html')
+    return FileResponse("static/index.html")
+
 
 def base64_to_image(base64_string: str, output_filename: str):
     if not os.path.exists(os.path.dirname(output_filename)):
@@ -150,6 +175,7 @@ def base64_to_image(base64_string: str, output_filename: str):
     with open(output_filename, "wb") as f:
         f.write(img_data)
     return output_filename
+
 
 @app.websocket("/ws/agent")
 async def agent_ws(websocket: WebSocket):
@@ -165,20 +191,32 @@ async def agent_ws(websocket: WebSocket):
         screenshot_urls = []
 
         # Callback for each step
-        def new_step_callback(state: BrowserState, model_output: AgentOutput, steps: int):
+        def new_step_callback(
+            state: BrowserState, model_output: AgentOutput, steps: int
+        ):
             nonlocal step_counter
             path = f"{SCREENSHOT_DIR}/{session_id}/step_{step_counter}.png"
             last_screenshot = state.screenshot
             img_path = base64_to_image(str(last_screenshot), path)
-            screenshot_url = f"/session_screenshots/{session_id}/step_{step_counter}.png"
+            screenshot_url = (
+                f"/session_screenshots/{session_id}/step_{step_counter}.png"
+            )
             screenshot_urls.append(screenshot_url)
+            # Extract memory information
+            status = getattr(getattr(model_output, "current_state", None), "memory", "")
             step_counter += 1
-            # Send the screenshot URL and base64 to the frontend in real time
-            asyncio.create_task(websocket.send_json({
-                "screenshot_url": screenshot_url,
-                "screenshot_base64": str(last_screenshot),
-                "step": step_counter
-            }))
+
+            # Send the screenshot URL, base64, and step status to the frontend
+            asyncio.create_task(
+                websocket.send_json(
+                    {
+                        "screenshot_url": screenshot_url,
+                        "screenshot_base64": str(last_screenshot),
+                        "step": step_counter,
+                        "status": status,
+                    }
+                )
+            )
 
         # Run the agent
         agent = Agent(
@@ -189,18 +227,22 @@ async def agent_ws(websocket: WebSocket):
         )
         result = await agent.run()
         # Send final result and all screenshot URLs
-        await websocket.send_json({
-            "result": str(result),
-            "status": "success",
-            "screenshot_urls": screenshot_urls,
-            "done": True
-        })
+        await websocket.send_json(
+            {
+                "result": str(result),
+                "status": "success",
+                "screenshot_urls": screenshot_urls,
+                "done": True,
+            }
+        )
     except WebSocketDisconnect:
         pass
     except Exception as e:
         await websocket.send_json({"error": str(e)})
         raise
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
