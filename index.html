@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Real-Time Screenshot Gallery</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            padding: 8px 16px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .status.connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status.disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .gallery {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        .gallery img {
+            width: 300px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fff;
+        }
+        .live-preview {
+            margin-bottom: 20px;
+        }
+        .live-preview img {
+            width: 100%;
+            max-width: 600px;
+            border: 2px solid #007bff;
+            border-radius: 8px;
+            background: #fff;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Agent Real-Time Screenshot Gallery</h1>
+        <div class="controls">
+            <input type="text" id="taskInput" placeholder="Enter task...">
+            <button onclick="startAgent()">Run Agent</button>
+        </div>
+        <div id="status" class="status disconnected">Disconnected</div>
+        <div class="live-preview">
+            <h3>Live Step Preview</h3>
+            <img id="liveImage" src="" alt="Live Screenshot Preview">
+        </div>
+        <div id="gallery" class="gallery"></div>
+        <div id="result" class="result"></div>
+    </div>
+    <script>
+        let ws = null;
+        let gallery = [];
+        function startAgent() {
+            const task = document.getElementById('taskInput').value.trim();
+            if (!task) {
+                alert('Please enter a task');
+                return;
+            }
+            document.getElementById('gallery').innerHTML = '';
+            document.getElementById('result').textContent = '';
+            document.getElementById('liveImage').src = '';
+            gallery = [];
+            if (ws) ws.close();
+            ws = new WebSocket('ws://localhost:8000/ws/agent');
+            ws.onopen = () => {
+                document.getElementById('status').className = 'status connected';
+                document.getElementById('status').textContent = 'Connected';
+                ws.send(JSON.stringify({ task: task, context: {} }));
+            };
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.screenshot_base64) {
+                    // Show live preview
+                    document.getElementById('liveImage').src = `data:image/png;base64,${data.screenshot_base64}`;
+                    // Add to gallery
+                    gallery.push(data.screenshot_url);
+                    updateGallery();
+                }
+                if (data.done) {
+                    document.getElementById('result').textContent = data.result;
+                    document.getElementById('status').className = 'status disconnected';
+                    document.getElementById('status').textContent = 'Disconnected';
+                }
+                if (data.error) {
+                    document.getElementById('result').textContent = 'Error: ' + data.error;
+                    document.getElementById('status').className = 'status disconnected';
+                    document.getElementById('status').textContent = 'Disconnected';
+                }
+            };
+            ws.onclose = () => {
+                document.getElementById('status').className = 'status disconnected';
+                document.getElementById('status').textContent = 'Disconnected';
+            };
+            ws.onerror = (error) => {
+                document.getElementById('status').className = 'status disconnected';
+                document.getElementById('status').textContent = 'Error';
+            };
+        }
+        function updateGallery() {
+            const galleryDiv = document.getElementById('gallery');
+            galleryDiv.innerHTML = '';
+            gallery.forEach(url => {
+                const img = document.createElement('img');
+                img.src = url;
+                galleryDiv.appendChild(img);
+            });
+        }
+    </script>
+</body>
+</html> 
