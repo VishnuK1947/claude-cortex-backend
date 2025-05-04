@@ -15,6 +15,7 @@ from browser_use.agent.views import AgentOutput
 import logging
 from playwright.async_api import async_playwright
 import subprocess
+from fastapi.responses import FileResponse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -136,7 +137,11 @@ async def execute_task(request: TaskRequest):
 
 # Serve screenshots statically
 app.mount("/session_screenshots", StaticFiles(directory=SCREENSHOT_DIR), name="session_screenshots")
-app.mount("/static", StaticFiles(directory=".", html=True), name="static")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+async def read_root():
+    return FileResponse('static/index.html')
 
 def base64_to_image(base64_string: str, output_filename: str):
     if not os.path.exists(os.path.dirname(output_filename)):
