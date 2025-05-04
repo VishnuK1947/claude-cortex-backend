@@ -5,4 +5,4 @@ anthropic==0.18.1
 langgraph==0.0.19
 browser-use==0.1.0
 pydantic==2.6.1
-python-multipart==0.0.9 
+python-multipart==0.0.9

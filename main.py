@@ -62,8 +62,8 @@ def master_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     
     # Use Claude to determine the best course of action
     response = claude.messages.create(
-        model="claude-3-opus-20240229",
-        max_tokens=1000,
+        model="claude-3-7-sonnet-20250219",
+        max_tokens=1024,
         messages=[
             {
                 "role": "user",
@@ -73,6 +73,7 @@ def master_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     )
     
     # Extract plan from Claude's response
+    print(response.content)
     plan = response.content[0].text
     
     # Update state with plan
@@ -85,8 +86,8 @@ def execute_plan(state: Dict[str, Any]) -> Dict[str, Any]:
     
     # Use Claude to determine which tools to use
     response = claude.messages.create(
-        model="claude-3-opus-20240229",
-        max_tokens=1000,
+        model="claude-3-7-sonnet-20250219",
+        max_tokens=1024,
         messages=[
             {
                 "role": "user",
