@@ -1,3 +1,4 @@
+from logging import Logger
 import os
 import uuid
 from typing import Dict, Any, List, Optional, Union
@@ -5,7 +6,7 @@ from pydantic import BaseModel, Field
 from langchain.tools import BaseTool
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain_core.prompts import PromptTemplate
-from browser_use import Agent as BrowserAgent
+from browser_use import Agent
 from langchain_anthropic import ChatAnthropic
 from browser_use.browser.views import BrowserState
 from browser_use.agent.views import AgentOutput
@@ -13,6 +14,9 @@ from playwright.async_api import async_playwright
 from dotenv import load_dotenv
 import anthropic
 import json
+import asyncio
+import base64
+from fastapi import WebSocket, WebSocketDisconnect
 
 load_dotenv()
 
@@ -20,82 +24,87 @@ SCREENSHOT_DIR = "session_screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 
-# Define the tool for browser use
+def base64_to_image(base64_string: str, output_filename: str):
+    if not os.path.exists(os.path.dirname(output_filename)):
+        os.makedirs(os.path.dirname(output_filename))
+    img_data = base64.b64decode(base64_string)
+    with open(output_filename, "wb") as f:
+        f.write(img_data)
+    return output_filename
+
+
 class BrowserTool(BaseTool):
     name: str = "browser_agent"
     description: str = (
         "Use a browser to interact with websites and accomplish tasks that require web navigation"
     )
 
-    async def _arun(self, task: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        session_id = str(uuid.uuid4())
-        screenshots = []
-        step_counter = 0
+    async def _arun(
+        self, task: str, context: Dict[str, Any] = None, websocket: WebSocket = None
+    ) -> Dict[str, Any]:
+        await websocket.accept()
+        try:
+            # Receive the task and context from the frontend
+            data = await websocket.receive_json()
+            task = data.get("task")
+            context = data.get("context", {})
+            session_id = str(uuid.uuid4())
+            step_counter = 0
+            llm = ChatAnthropic(model="claude-3-7-sonnet-20250219")
+            screenshot_urls = []
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
-            browser_context = await browser.new_context()
-            page = await browser_context.new_page()
-
-            # Create LLM
-            llm = ChatAnthropic(
-                model_name="claude-3-5-sonnet-20240620",
-                temperature=0.0,
-                timeout=100,
-                anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
-            )
-
-            # Define screenshot callback
-            async def screenshot_callback(
+            # Callback for each step
+            def new_step_callback(
                 state: BrowserState, model_output: AgentOutput, steps: int
             ):
                 nonlocal step_counter
-                # Take screenshot
-                session_path = os.path.join(SCREENSHOT_DIR, session_id)
-                os.makedirs(session_path, exist_ok=True)
-                filename = f"step_{step_counter}.jpg"
-                filepath = os.path.join(session_path, filename)
-                await page.screenshot(path=filepath, type="jpeg", quality=80)
-                screenshot_url = f"/session_screenshots/{session_id}/{filename}"
-                screenshots.append(screenshot_url)
+                path = f"{SCREENSHOT_DIR}/{session_id}/step_{step_counter}.png"
+                last_screenshot = state.screenshot
+                img_path = base64_to_image(str(last_screenshot), path)
+                screenshot_url = (
+                    f"/session_screenshots/{session_id}/step_{step_counter}.png"
+                )
+                screenshot_urls.append(screenshot_url)
+                # Extract memory information
+                status = getattr(
+                    getattr(model_output, "current_state", None), "memory", ""
+                )
                 step_counter += 1
 
-            # Create and run agent
-            agent = BrowserAgent(
-                task=task,
-                llm=llm,
-                context=context or {},
-                register_new_step_callback=screenshot_callback,
-            )
-
-            # If the agent has a start URL, go there
-            if hasattr(agent, "start_url") and agent.start_url:
-                await page.goto(agent.start_url)
-                # Take screenshot after navigation
-                session_path = os.path.join(SCREENSHOT_DIR, session_id)
-                os.makedirs(session_path, exist_ok=True)
-                filename = f"step_{step_counter}.jpg"
-                filepath = os.path.join(session_path, filename)
-                await page.screenshot(path=filepath, type="jpeg", quality=80)
-                screenshots.append(f"/session_screenshots/{session_id}/{filename}")
-                step_counter += 1
+                # Send the screenshot URL, base64, and step status to the frontend
+                asyncio.create_task(
+                    websocket.send_json(
+                        {
+                            "screenshot_url": screenshot_url,
+                            "screenshot_base64": str(last_screenshot),
+                            "step": step_counter,
+                            "status": status,
+                        }
+                    )
+                )
 
             # Run the agent
+            agent = Agent(
+                task=task,
+                llm=llm,
+                context=context,
+                register_new_step_callback=new_step_callback,
+            )
             result = await agent.run()
-
-            # Take final screenshot
-            session_path = os.path.join(SCREENSHOT_DIR, session_id)
-            os.makedirs(session_path, exist_ok=True)
-            filename = f"step_{step_counter}.jpg"
-            filepath = os.path.join(session_path, filename)
-            await page.screenshot(path=filepath, type="jpeg", quality=80)
-            screenshots.append(f"/session_screenshots/{session_id}/{filename}")
-
-            # Close browser
-            await browser_context.close()
-            await browser.close()
-
-            return {"result": str(result), "screenshot_urls": screenshots}
+            # Send final result and all screenshot URLs
+            await websocket.send_json(
+                {
+                    "result": str(result),
+                    "status": "success",
+                    "screenshot_urls": screenshot_urls,
+                    "done": True,
+                }
+            )
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            await websocket.send_json({"error": str(e)})
+            raise
 
     def _run(self, task: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
         raise NotImplementedError("BrowserTool is async only")
@@ -124,7 +133,7 @@ class DirectLLMTool:
 
         # Make direct Claude API call
         response = await client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-3-7-sonnet-20250219",
             max_tokens=4096,
             temperature=0,
             system="You are a helpful AI assistant that provides accurate and concise answers.",

@@ -16,6 +16,7 @@ import logging
 from playwright.async_api import async_playwright
 import subprocess
 from fastapi.responses import FileResponse
+from tools import BrowserTool
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -179,67 +180,8 @@ def base64_to_image(base64_string: str, output_filename: str):
 
 @app.websocket("/ws/agent")
 async def agent_ws(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        # Receive the task and context from the frontend
-        data = await websocket.receive_json()
-        task = data.get("task")
-        context = data.get("context", {})
-        session_id = str(uuid.uuid4())
-        step_counter = 0
-        llm = ChatAnthropic(model="claude-3-opus-20240229")
-        screenshot_urls = []
-
-        # Callback for each step
-        def new_step_callback(
-            state: BrowserState, model_output: AgentOutput, steps: int
-        ):
-            nonlocal step_counter
-            path = f"{SCREENSHOT_DIR}/{session_id}/step_{step_counter}.png"
-            last_screenshot = state.screenshot
-            img_path = base64_to_image(str(last_screenshot), path)
-            screenshot_url = (
-                f"/session_screenshots/{session_id}/step_{step_counter}.png"
-            )
-            screenshot_urls.append(screenshot_url)
-            # Extract memory information
-            status = getattr(getattr(model_output, "current_state", None), "memory", "")
-            step_counter += 1
-
-            # Send the screenshot URL, base64, and step status to the frontend
-            asyncio.create_task(
-                websocket.send_json(
-                    {
-                        "screenshot_url": screenshot_url,
-                        "screenshot_base64": str(last_screenshot),
-                        "step": step_counter,
-                        "status": status,
-                    }
-                )
-            )
-
-        # Run the agent
-        agent = Agent(
-            task=task,
-            llm=llm,
-            context=context,
-            register_new_step_callback=new_step_callback,
-        )
-        result = await agent.run()
-        # Send final result and all screenshot URLs
-        await websocket.send_json(
-            {
-                "result": str(result),
-                "status": "success",
-                "screenshot_urls": screenshot_urls,
-                "done": True,
-            }
-        )
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        await websocket.send_json({"error": str(e)})
-        raise
+    tool = BrowserTool()
+    await tool._arun(task="", context={}, websocket=websocket)
 
 
 if __name__ == "__main__":
