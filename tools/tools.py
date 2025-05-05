@@ -17,12 +17,13 @@ import json
 import asyncio
 import base64
 from fastapi import WebSocket, WebSocketDisconnect
-from bedrock_claude import BedrockClaudeClient
+from agents.bedrock_claude import BedrockClaudeClient
 
 load_dotenv()
 
 SCREENSHOT_DIR = "session_screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
 
 class SecureClaudeTool(BaseTool):
     name: str = "secure_claude"
@@ -37,6 +38,7 @@ class SecureClaudeTool(BaseTool):
         """
         # Bedrock is sync; run in thread executor for async
         import asyncio
+
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, lambda: self.client.chat(prompt))
         return {
@@ -44,6 +46,7 @@ class SecureClaudeTool(BaseTool):
             "screenshot_urls": [],
             "tool_used": "secure_claude",
         }
+
 
 def base64_to_image(base64_string: str, output_filename: str):
     if not os.path.exists(os.path.dirname(output_filename)):
@@ -72,11 +75,13 @@ class BrowserTool(BaseTool):
             session_id = str(uuid.uuid4())
             step_counter = 0
             # Use secure Claude if context['secure_mode'] is True
-            if context and context.get('secure_mode'):
+            if context and context.get("secure_mode"):
                 secure_tool = SecureClaudeTool()
+
                 class DummyLLM:
                     async def __call__(self, *args, **kwargs):
                         return await secure_tool.run(task, context)
+
                 llm = DummyLLM()
             else:
                 llm = ChatAnthropic(model="claude-3-7-sonnet-20250219")

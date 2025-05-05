@@ -2,11 +2,11 @@ import os
 import uuid
 import base64
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from browser_use import Agent
@@ -17,6 +17,9 @@ from playwright.async_api import async_playwright
 import subprocess
 from fastapi.responses import FileResponse
 from tools.tools import BrowserTool
+
+# Import LangGraph components
+from langgraph_implementation import execute_task_with_graph, create_empty_state
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -51,14 +54,13 @@ class TaskRequest(BaseModel):
 class TaskResponse(BaseModel):
     result: str
     status: str
-    screenshot_urls: list[str]
+    screenshot_urls: List[str] = []
 
 
 def create_llm():
     return ChatAnthropic(
-        model_name="claude-3-5-sonnet-20240620",
+        model="claude-3-7-sonnet-20250219",
         temperature=0.0,
-        timeout=100,
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
     )
 
@@ -85,70 +87,30 @@ async def install_browsers():
         return False
 
 
-async def take_and_save_screenshot(page, session_id, step_num, description=""):
-    session_path = os.path.join(SCREENSHOT_DIR, session_id)
-    os.makedirs(session_path, exist_ok=True)
-    filename = f"step_{step_num}.jpg"
-    filepath = os.path.join(session_path, filename)
-    await page.screenshot(path=filepath, type="jpeg", quality=80)
-    return f"/session_screenshots/{session_id}/{filename}"
-
-
-async def run_agent_with_screenshots(agent, page, session_id):
-    print("Running agent with screenshots")
-    screenshots = []
-    step_counter = {"count": 0}
-    # Take initial screenshot (blank page)
-    screenshots.append(
-        await take_and_save_screenshot(
-            page, session_id, step_counter["count"], "initial"
-        )
-    )
-    step_counter["count"] += 1
-    # If the agent has a URL to visit, go there and take a screenshot
-    if hasattr(agent, "start_url") and agent.start_url:
-        await page.goto(agent.start_url)
-        screenshots.append(
-            await take_and_save_screenshot(
-                page, session_id, step_counter["count"], "after_goto"
-            )
-        )
-        step_counter["count"] += 1
-    # Run the agent and take a screenshot after
-    result = await agent.run()
-    screenshots.append(
-        await take_and_save_screenshot(
-            page, session_id, step_counter["count"], "after_agent_run"
-        )
-    )
-    return result, screenshots
-
-
 @app.post("/execute_task", response_model=TaskResponse)
 async def execute_task(request: TaskRequest):
     try:
         logger.info(f"Received task request: {request.task}")
+
+        # Check if browsers are installed, install if needed
         if not await check_browsers():
             logger.info("Browsers not installed, attempting to install...")
             if not await install_browsers():
                 raise HTTPException(
                     status_code=500, detail="Failed to install browsers"
                 )
-        session_id = str(uuid.uuid4())
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
-            context = await browser.new_context()
-            page = await context.new_page()
-            llm = create_llm()
-            agent = Agent(task=request.task, llm=llm, context=request.context)
-            result, screenshot_urls = await run_agent_with_screenshots(
-                agent, page, session_id
-            )
-            result_str = str(result)
-            await context.close()
-            await browser.close()
+
+        # Execute task using LangGraph
+        result = await execute_task_with_graph(request.task, request.context)
+
+        # Extract information from result
+        result_str = result.get("final_result", "No result available")
+        screenshot_urls = result.get("screenshots", [])
+
         return TaskResponse(
-            result=result_str, status="success", screenshot_urls=screenshot_urls
+            result=result_str,
+            status="success" if not result.get("errors") else "error",
+            screenshot_urls=screenshot_urls,
         )
     except Exception as e:
         logger.error(f"Error processing task: {str(e)}")
@@ -180,8 +142,23 @@ def base64_to_image(base64_string: str, output_filename: str):
 
 @app.websocket("/ws/agent")
 async def agent_ws(websocket: WebSocket):
-    tool = BrowserTool()
-    await tool._arun(task="", context={}, websocket=websocket)
+    await websocket.accept()
+    try:
+        # Receive the task and context from the frontend
+        data = await websocket.receive_json()
+        task = data.get("task")
+        context = data.get("context", {})
+
+        # Execute task using LangGraph with websocket
+        await execute_task_with_graph(task, context, websocket)
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"Error in WebSocket: {str(e)}")
+        try:
+            await websocket.send_json({"error": str(e)})
+        except:
+            pass
 
 
 if __name__ == "__main__":
