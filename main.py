@@ -2,21 +2,18 @@ import os
 import uuid
 import base64
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
-from browser_use import Agent
-from browser_use.browser.views import BrowserState
-from browser_use.agent.views import AgentOutput
 import logging
 from playwright.async_api import async_playwright
 import subprocess
 from fastapi.responses import FileResponse
-from tools import BrowserTool
+from master_agent import MasterAgent  # Import the new MasterAgent class
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -48,10 +45,18 @@ class TaskRequest(BaseModel):
     context: Dict[str, Any] = {}
 
 
+class SubtaskInfo(BaseModel):
+    task_id: str
+    agent_type: str
+    task: str
+    status: str
+
+
 class TaskResponse(BaseModel):
     result: str
     status: str
-    screenshot_urls: list[str]
+    subtasks: List[SubtaskInfo] = []
+    screenshot_urls: Dict[str, List[str]] = {}
 
 
 def create_llm():
@@ -85,74 +90,115 @@ async def install_browsers():
         return False
 
 
-async def take_and_save_screenshot(page, session_id, step_num, description=""):
-    session_path = os.path.join(SCREENSHOT_DIR, session_id)
-    os.makedirs(session_path, exist_ok=True)
-    filename = f"step_{step_num}.jpg"
-    filepath = os.path.join(session_path, filename)
-    await page.screenshot(path=filepath, type="jpeg", quality=80)
-    return f"/session_screenshots/{session_id}/{filename}"
-
-
-async def run_agent_with_screenshots(agent, page, session_id):
-    print("Running agent with screenshots")
-    screenshots = []
-    step_counter = {"count": 0}
-    # Take initial screenshot (blank page)
-    screenshots.append(
-        await take_and_save_screenshot(
-            page, session_id, step_counter["count"], "initial"
-        )
-    )
-    step_counter["count"] += 1
-    # If the agent has a URL to visit, go there and take a screenshot
-    if hasattr(agent, "start_url") and agent.start_url:
-        await page.goto(agent.start_url)
-        screenshots.append(
-            await take_and_save_screenshot(
-                page, session_id, step_counter["count"], "after_goto"
-            )
-        )
-        step_counter["count"] += 1
-    # Run the agent and take a screenshot after
-    result = await agent.run()
-    screenshots.append(
-        await take_and_save_screenshot(
-            page, session_id, step_counter["count"], "after_agent_run"
-        )
-    )
-    return result, screenshots
-
-
 @app.post("/execute_task", response_model=TaskResponse)
 async def execute_task(request: TaskRequest):
     try:
         logger.info(f"Received task request: {request.task}")
+        
+        # Check if browsers are installed
         if not await check_browsers():
             logger.info("Browsers not installed, attempting to install...")
             if not await install_browsers():
                 raise HTTPException(
                     status_code=500, detail="Failed to install browsers"
                 )
+        
+        # Create a session ID
         session_id = str(uuid.uuid4())
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
-            context = await browser.new_context()
-            page = await context.new_page()
-            llm = create_llm()
-            agent = Agent(task=request.task, llm=llm, context=request.context)
-            result, screenshot_urls = await run_agent_with_screenshots(
-                agent, page, session_id
+        
+        # Create the master agent
+        llm = create_llm()
+        master_agent = MasterAgent(task=request.task, llm=llm, context=request.context)
+        
+        # Run the master agent (this handles planning, execution, and synthesis)
+        result = await master_agent.run()
+        
+        # Prepare the response
+        subtasks_info = [
+            SubtaskInfo(
+                task_id=task.task_id,
+                agent_type=task.agent_type,
+                task=task.task,
+                status=task.status
             )
-            result_str = str(result)
-            await context.close()
-            await browser.close()
+            for task in master_agent.subtasks
+        ]
+        
+        # Collect screenshot URLs by task
+        screenshot_urls = {}
+        for task in master_agent.subtasks:
+            if task.screenshots:
+                screenshot_urls[task.task_id] = [
+                    screenshot.get("url") for screenshot in task.screenshots
+                    if screenshot.get("url")
+                ]
+        
         return TaskResponse(
-            result=result_str, status="success", screenshot_urls=screenshot_urls
+            result=result,
+            status="success",
+            subtasks=subtasks_info,
+            screenshot_urls=screenshot_urls
         )
+        
     except Exception as e:
         logger.error(f"Error processing task: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.websocket("/ws/master_agent")
+async def master_agent_ws(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        # Receive the task and context from the frontend
+        data = await websocket.receive_json()
+        task = data.get("task")
+        context = data.get("context", {})
+        
+        # Create LLM
+        llm = create_llm()
+        
+        # Create the master agent with the WebSocket
+        master_agent = MasterAgent(
+            task=task,
+            llm=llm,
+            context=context,
+            websocket=websocket
+        )
+        
+        # Send initial status
+        await websocket.send_json({
+            "type": "status_update",
+            "status": "initialized",
+            "message": "Master agent initialized"
+        })
+        
+        # Run the master agent
+        try:
+            result = await master_agent.run()
+            
+            # Send final result
+            await websocket.send_json({
+                "type": "final_result",
+                "result": result,
+                "status": "success",
+                "done": True
+            })
+            
+        except Exception as e:
+            logger.error(f"Error in master agent execution: {str(e)}")
+            await websocket.send_json({
+                "type": "error",
+                "error": str(e),
+                "status": "error",
+                "done": True
+            })
+            
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {str(e)}")
+        await websocket.send_json({"type": "error", "error": str(e)})
+        raise
 
 
 # Serve screenshots statically
@@ -167,21 +213,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.get("/")
 async def read_root():
     return FileResponse("static/index.html")
-
-
-def base64_to_image(base64_string: str, output_filename: str):
-    if not os.path.exists(os.path.dirname(output_filename)):
-        os.makedirs(os.path.dirname(output_filename))
-    img_data = base64.b64decode(base64_string)
-    with open(output_filename, "wb") as f:
-        f.write(img_data)
-    return output_filename
-
-
-@app.websocket("/ws/agent")
-async def agent_ws(websocket: WebSocket):
-    tool = BrowserTool()
-    await tool._arun(task="", context={}, websocket=websocket)
 
 
 if __name__ == "__main__":
