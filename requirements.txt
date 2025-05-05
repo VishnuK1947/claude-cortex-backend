@@ -6,3 +6,4 @@ langgraph
 browser-use
 pydantic
 python-multipart
+boto3

@@ -17,12 +17,33 @@ import json
 import asyncio
 import base64
 from fastapi import WebSocket, WebSocketDisconnect
+from bedrock_claude import BedrockClaudeClient
 
 load_dotenv()
 
 SCREENSHOT_DIR = "session_screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
+class SecureClaudeTool(BaseTool):
+    name = "secure_claude"
+    description = "Use Claude via AWS Bedrock for secure mode."
+
+    def __init__(self):
+        self.client = BedrockClaudeClient()
+
+    async def run(self, task: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        prompt = f"""
+        You are a helpful AI assistant that provides accurate and concise answers.\n\nContext information: {json.dumps(context) if context else '{}'}\n\nUser task: {task}\n\nPlease provide a helpful response based on the task and context provided.
+        """
+        # Bedrock is sync; run in thread executor for async
+        import asyncio
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: self.client.chat(prompt))
+        return {
+            "result": result,
+            "screenshot_urls": [],
+            "tool_used": "secure_claude",
+        }
 
 def base64_to_image(base64_string: str, output_filename: str):
     if not os.path.exists(os.path.dirname(output_filename)):
@@ -50,7 +71,15 @@ class BrowserTool(BaseTool):
             context = data.get("context", {})
             session_id = str(uuid.uuid4())
             step_counter = 0
-            llm = ChatAnthropic(model="claude-3-7-sonnet-20250219")
+            # Use secure Claude if context['secure_mode'] is True
+            if context and context.get('secure_mode'):
+                secure_tool = SecureClaudeTool()
+                class DummyLLM:
+                    async def __call__(self, *args, **kwargs):
+                        return await secure_tool.run(task, context)
+                llm = DummyLLM()
+            else:
+                llm = ChatAnthropic(model="claude-3-7-sonnet-20250219")
             screenshot_urls = []
 
             # Callback for each step
