@@ -25,8 +25,8 @@ SCREENSHOT_DIR = "session_screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 class SecureClaudeTool(BaseTool):
-    name = "secure_claude"
-    description = "Use Claude via AWS Bedrock for secure mode."
+    name: str = "secure_claude"
+    description: str = "Use Claude via AWS Bedrock for secure mode."
 
     def __init__(self):
         self.client = BedrockClaudeClient()
